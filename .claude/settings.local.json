@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Invoke-RestMethod -Uri \"https://trading-bot-delta-smoky.vercel.app/api/webhook\" -Method POST -ContentType \"application/json\" -Body '{\"symbol\":\"BTCUSDT\",\"exchange\":\"BINANCE\",\"timeframe\":\"15\",\"close\":\"104500\",\"volume\":\"2341\",\"strategy\":\"SUPPORT_BOUNCE\",\"signal\":\"LONG\",\"rsi\":\"32\"}')"
+    ]
+  }
+}
