@@ -23,12 +23,51 @@ export const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h'];
 
 // ── Live price fetch ──────────────────────────────────────────────
 
+// TwelveData symbol → our internal symbol (forex only)
+const TD_FOREX_QUOTE_MAP = {
+  'EUR/USD': 'EURUSD',
+  'USD/JPY': 'USDJPY',
+  'GBP/USD': 'GBPUSD',
+  'AUD/USD': 'AUDUSD',
+  'USD/CHF': 'USDCHF',
+};
+
+/**
+ * Fetch 24h change % for all forex pairs via TwelveData /quote.
+ * Returns an object { EURUSD: 0.12, USDJPY: -0.34, ... } or {} if no key.
+ *
+ * Call rate: every 10 minutes (5 symbols × 144 cycles = 720 credits/day < 800 free limit)
+ */
+export async function fetchForexChanges() {
+  const apiKey = import.meta.env.VITE_TWELVEDATA_API_KEY;
+  if (!apiKey) return {};
+
+  const pairs = Object.keys(TD_FOREX_QUOTE_MAP).join(',');
+  try {
+    const res  = await fetch(
+      `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(pairs)}&apikey=${apiKey}`,
+    );
+    const data = await res.json();
+
+    const result = {};
+    // Multi-symbol response: { "EUR/USD": { percent_change: "0.123", ... }, ... }
+    for (const [tdSym, quote] of Object.entries(data)) {
+      const sym = TD_FOREX_QUOTE_MAP[tdSym];
+      if (sym && quote.percent_change != null)
+        result[sym] = parseFloat(quote.percent_change);
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
 export async function fetchAllPrices() {
   const prices  = {};
   const changes = {};
 
-  // Forex — Coinbase public API (free, no key, CORS-friendly)
-  // Returns rates relative to USD: { data: { rates: { EUR: "0.92", ... } } }
+  // ── Forex prices — Coinbase (free, no key) ────────────────────
+  // Returns current rates only — 24h change is fetched separately by fetchForexChanges()
   try {
     const res  = await fetch('https://api.coinbase.com/v2/exchange-rates?currency=USD');
     const data = await res.json();
@@ -40,7 +79,7 @@ export async function fetchAllPrices() {
     if (r.CHF) prices.USDCHF = parseFloat(parseFloat(r.CHF).toFixed(5));
   } catch { /* network error — skip */ }
 
-  // Crypto + Gold — CoinGecko (free, CORS-friendly)
+  // ── Crypto + Gold — CoinGecko (free, no key) ─────────────────
   // pax-gold (PAXG) is pegged 1:1 to one troy oz of physical gold
   try {
     const res = await fetch(

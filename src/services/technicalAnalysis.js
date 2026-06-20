@@ -174,11 +174,9 @@ export function buildTechnicalSummary(candles, dataSource = 'unknown') {
 // ── Format summary as readable text block for Gemini ─────────
 export function formatForPrompt(summary, symbol, timeframe) {
   if (!summary) {
-    return [
-      `DATA AVAILABLE: Current price only (no OHLCV history for ${symbol} on ${timeframe}).`,
-      `Use your knowledge of ${symbol} market structure, typical volatility, and key price levels`,
-      `to produce a complete, conservative trade plan.`,
-    ].join('\n');
+    // Hard error — BotEngine must gate before reaching this point.
+    // Never allow Gemini to receive a prompt without real OHLCV data.
+    throw new Error(`formatForPrompt: no technical summary for ${symbol} ${timeframe} — analysis should have been skipped`);
   }
 
   // Helper: smart decimal precision based on price magnitude

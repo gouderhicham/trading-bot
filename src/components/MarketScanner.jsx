@@ -1,12 +1,13 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { INSTRUMENTS, TIMEFRAMES, fetchAllPrices, computeRSI, formatPrice } from '../services/marketData';
+import { INSTRUMENTS, TIMEFRAMES, fetchAllPrices, fetchForexChanges, computeRSI, formatPrice } from '../services/marketData';
 import { TF_MINUTES, ANALYZABLE_SYMBOLS } from '../services/candles';
 
-const PRICE_REFRESH_MS   = 30_000;
-const SCAN_INTERVAL_MS   = 120_000;
-const INITIAL_SCAN_DELAY = 15_000;
+const PRICE_REFRESH_MS   =  30_000;   // 30 s — Coinbase + CoinGecko (free, no limit)
+const CHANGE_REFRESH_MS  = 600_000;   // 10 min — TwelveData forex change (800 credits/day budget)
+const SCAN_INTERVAL_MS   = 120_000;   // 2 min
+const INITIAL_SCAN_DELAY =  15_000;
 
 // All instruments that have at least one OHLCV source (Binance, TwelveData, or AlphaVantage)
 // If an instrument's candle fetch fails at analysis time, BotEngine gates it with status='skipped'
@@ -16,11 +17,20 @@ const SCAN_QUEUE = [];
 ANALYZABLE_INSTRUMENTS.forEach(inst => TIMEFRAMES.forEach(tf => SCAN_QUEUE.push({ inst, tf })));
 
 export default function MarketScanner({ onLog, onPricesUpdate, onScanStatus }) {
-  const histRef    = useRef({});
-  const scanIdxRef = useRef(0);
-  const busyRef    = useRef(false);
+  const histRef       = useRef({});
+  const scanIdxRef    = useRef(0);
+  const busyRef       = useRef(false);
+  const forexChgRef   = useRef({});   // persists forex 24h changes between fast refresh cycles
 
-  /* ─── Price refresh (all instruments for display) ────────── */
+  /* ─── Forex 24h change (slow — TwelveData, 10-min budget) ─── */
+  const refreshForexChanges = useCallback(async () => {
+    const chg = await fetchForexChanges();
+    if (Object.keys(chg).length > 0) {
+      Object.assign(forexChgRef.current, chg);
+    }
+  }, []);
+
+  /* ─── Price refresh (fast — Coinbase + CoinGecko, free) ─────── */
   const refreshPrices = useCallback(async () => {
     try {
       const { prices, changes } = await fetchAllPrices();
@@ -36,7 +46,10 @@ export default function MarketScanner({ onLog, onPricesUpdate, onScanStatus }) {
         rsiMap[symbol] = computeRSI(histRef.current[symbol]);
       });
 
-      onPricesUpdate({ prices, changes, rsi: rsiMap });
+      // Merge: CoinGecko crypto/gold changes + persisted forex changes (from slow timer)
+      const mergedChanges = { ...forexChgRef.current, ...changes };
+
+      onPricesUpdate({ prices, changes: mergedChanges, rsi: rsiMap });
       const n = Object.keys(prices).length;
       if (n > 0) onLog(`📊 Market data refreshed — ${n} instruments live`);
     } catch (err) {
@@ -114,17 +127,20 @@ export default function MarketScanner({ onLog, onPricesUpdate, onScanStatus }) {
     if (unrouted.length) onLog(`👁️  Monitor only (no OHLCV source): ${unrouted.join(', ')}`);
     onLog(`⏱️  Timeframes: ${TIMEFRAMES.join(', ')} · Scan every 2 min`);
 
+    refreshForexChanges();                                          // immediate first fetch
     refreshPrices();
-    const priceTimer = setInterval(refreshPrices, PRICE_REFRESH_MS);
-    const firstScan  = setTimeout(runScan, INITIAL_SCAN_DELAY);
-    const scanTimer  = setInterval(runScan, SCAN_INTERVAL_MS);
+    const priceTimer  = setInterval(refreshPrices, PRICE_REFRESH_MS);
+    const changeTimer = setInterval(refreshForexChanges, CHANGE_REFRESH_MS);
+    const firstScan   = setTimeout(runScan, INITIAL_SCAN_DELAY);
+    const scanTimer   = setInterval(runScan, SCAN_INTERVAL_MS);
 
     return () => {
       clearInterval(priceTimer);
+      clearInterval(changeTimer);
       clearInterval(scanTimer);
       clearTimeout(firstScan);
     };
-  }, [onLog, refreshPrices, runScan]);
+  }, [onLog, refreshForexChanges, refreshPrices, runScan]);
 
   return null;
 }
