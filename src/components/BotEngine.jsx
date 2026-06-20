@@ -1,32 +1,34 @@
 import { useEffect } from 'react';
 import { collection, query, where, onSnapshot, doc, updateDoc, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { analyzeTradeSignal } from '../services/gemini';
+import { analyzeTradeSignal, KEY_POOL_SIZE, STRATEGY_RULES } from '../services/gemini';
 import { sendTelegramMessage, buildApprovedMessage } from '../services/telegram';
-import { fetchCandles, TF_MINUTES } from '../services/candles';
+import { fetchCandles } from '../services/candles';
 import { buildTechnicalSummary } from '../services/technicalAnalysis';
 
-const CONFIDENCE_THRESHOLD  = 75;
-const RISK_REWARD_THRESHOLD = 2;
+const CONFIDENCE_THRESHOLD = 75;
 
+// Strategy-aware risk engine — each strategy has its own minimum R:R
 function runRiskEngine(analysis) {
   const rejections = [];
+  const strategy   = analysis.strategy || 'day_trading';
+  const minRR      = STRATEGY_RULES[strategy]?.minRR ?? 2.0;
+
   if (analysis.confidence < CONFIDENCE_THRESHOLD)
     rejections.push(`Confidence ${analysis.confidence}% below ${CONFIDENCE_THRESHOLD}%`);
-  if (analysis.risk_reward < RISK_REWARD_THRESHOLD)
-    rejections.push(`R:R ${analysis.risk_reward} below ${RISK_REWARD_THRESHOLD}`);
+  if (analysis.risk_reward < minRR)
+    rejections.push(`R:R ${analysis.risk_reward} below ${minRR} min (${strategy.replace('_', ' ')})`);
+
   return { passed: rejections.length === 0, rejections };
 }
 
-// Resolve timeframe label from minutes number (e.g. 15 → '15m')
-function tfLabel(minutes) {
-  return Object.entries(TF_MINUTES).find(([, m]) => m === minutes)?.[0] ?? `${minutes}m`;
-}
+// All timeframes fetched in parallel for every analysis
+const ALL_TFS = ['1m', '5m', '15m', '30m', '1h'];
 
 export default function BotEngine({ onLog, onPipelineUpdate }) {
   useEffect(() => {
     const push = (data) => onPipelineUpdate?.(data);
-    const q = query(collection(db, 'alerts'), where('status', '==', 'pending'));
+    const q    = query(collection(db, 'alerts'), where('status', '==', 'pending'));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       snapshot.docChanges().forEach(async (change) => {
@@ -40,127 +42,116 @@ export default function BotEngine({ onLog, onPipelineUpdate }) {
         // ── Stage 1: Received ───────────────────────────────────
         push({ stage: 'received', alert: alertData });
 
-        const src   = alertData.source === 'market-scanner' ? '🔄 Auto-scan' : '📡 Webhook';
-        const tf    = alertData.timeframe ? ` ${alertData.timeframe}m` : '';
-        const sig   = alertData.signal ? ` · ${alertData.signal}` : '';
-        const price = alertData.close ?? alertData.price;
-        const rsiStr = alertData.rsi != null ? ` · RSI: ${alertData.rsi}` : '';
-        onLog(`${src}: ${alertData.symbol}${tf}${sig} @ ${price}${rsiStr}`);
-        onLog(`   Exchange: ${alertData.exchange || '—'} · Strategy: ${alertData.strategy || '—'}`);
+        const src    = alertData.source === 'market-scanner' ? '🔄 Auto-scan' : '📡 Webhook';
+        const sig    = alertData.signal ? ` · ${alertData.signal}` : '';
+        const price  = alertData.close ?? alertData.price;
+        onLog(`${src}: ${alertData.symbol}${sig} @ ${price}`);
 
         try {
-          // ── Fetch OHLCV candles — REQUIRED before Gemini ────────
-          const tf_str = alertData.timeframe ? tfLabel(alertData.timeframe) : '15m';
+          // ── Fetch ALL timeframes in parallel ─────────────────
+          onLog(`📈 Fetching ${alertData.symbol} candles across ${ALL_TFS.length} timeframes...`);
 
-          onLog(`📈 Fetching ${alertData.symbol} OHLCV candles (${tf_str}, 200 bars)...`);
-          let candles = null;
-          let candleSource = null;
-          try {
-            const result = await fetchCandles(alertData.symbol, tf_str, 200);
-            candles      = result.candles;
-            candleSource = result.source;
-          } catch (candleErr) {
-            onLog(`⛔ Candle fetch failed for ${alertData.symbol}: ${candleErr.message} — analysis aborted`);
-          }
+          const settled = await Promise.allSettled(
+            ALL_TFS.map(async (tf) => {
+              const { candles, source } = await fetchCandles(alertData.symbol, tf, 200);
+              if (!candles || candles.length < 50) return null;
+              const summary = buildTechnicalSummary(candles, source ?? 'Unknown');
+              if (!summary) return null;
+              return { tf, summary, barCount: candles.length, source };
+            }),
+          );
 
-          // Hard gate: no real OHLCV data = no analysis
-          if (!candles || candles.length < 50) {
-            onLog(`⛔ ${alertData.symbol}: insufficient OHLCV data (${candles?.length ?? 0} bars, need ≥50) — skipping`);
-            await updateDoc(alertRef, { status: 'skipped', reason: 'insufficient_ohlcv' });
+          const tfSummaries = settled
+            .map(r => r.status === 'fulfilled' ? r.value : null)
+            .filter(Boolean);
+
+          // Hard gate — need at least one TF with real data
+          if (tfSummaries.length === 0) {
+            onLog(`⛔ ${alertData.symbol}: no OHLCV data on any timeframe — skipping`);
+            await updateDoc(alertRef, { status: 'skipped', reason: 'no_ohlcv_data' });
             push(null);
             return;
           }
 
-          const technicalSummary = buildTechnicalSummary(candles, candleSource ?? 'Unknown');
+          // Log what we have
+          const tfLine = tfSummaries.map(r => `${r.tf}(${r.barCount}bars)`).join(' · ');
+          onLog(`📊 Data ready: ${tfLine}`);
+          tfSummaries.forEach(({ tf, summary: s }) => {
+            const emaDir = s.ema.ema9 && s.ema.ema20
+              ? (s.ema.ema9 > s.ema.ema20 ? '▲' : '▼') : '?';
+            onLog(`   ${tf}: RSI=${s.rsi ?? 'N/A'} · ${s.trend} · EMA ${emaDir} · ATR=${s.atr?.toFixed(5) ?? 'N/A'}`);
+          });
 
-          if (!technicalSummary) {
-            onLog(`⛔ ${alertData.symbol}: technical summary failed — skipping`);
-            await updateDoc(alertRef, { status: 'skipped', reason: 'summary_build_failed' });
-            push(null);
-            return;
-          }
-
-          // Log computed indicators
-          const s = technicalSummary;
-          onLog(`📈 ${candles.length} candles — RSI: ${s.rsi ?? 'N/A'} · Trend: ${s.trend} · ATR: ${s.atr?.toFixed(5) ?? 'N/A'}`);
-          if (s.ema.ema20 && s.ema.ema50) {
-            const align = s.ema.ema9 > s.ema.ema20 && s.ema.ema20 > s.ema.ema50 ? 'BULLISH' :
-                          s.ema.ema9 < s.ema.ema20 && s.ema.ema20 < s.ema.ema50 ? 'BEARISH' : 'MIXED';
-            onLog(`   EMA(9/20/50): ${align}`);
-          }
-          if (s.macd) {
-            const dir = s.macd.histogram > 0 ? '▲' : '▼';
-            onLog(`   MACD hist: ${dir} ${s.macd.histogram.toFixed(6)}${s.macd.crossover ? ' ← CROSSOVER' : s.macd.crossunder ? ' ← CROSSUNDER' : ''}`);
-          }
-          if (s.bollinger)
-            onLog(`   BB %B: ${s.bollinger.pct_b.toFixed(1)}% · width: ${s.bollinger.width_pct.toFixed(2)}%`);
-          if (s.key_levels.resistance.length || s.key_levels.support.length) {
-            const res = s.key_levels.resistance.map(v => v.toFixed(5)).join(' / ');
-            const sup = s.key_levels.support.map(v => v.toFixed(5)).join(' / ');
-            onLog(`   Resistance: ${res || '—'} · Support: ${sup || '—'}`);
-          }
-
-          // ── Stage 2: Gemini ─────────────────────────────────────
+          // ── Stage 2: Gemini multi-TF analysis ────────────────
           push({ stage: 'gemini', alert: alertData });
-          onLog(`🧠 Full data confirmed — sending to Gemini-2.5-Flash...`);
+          onLog(`🧠 Sending ${tfSummaries.length}-TF data to Gemini (${KEY_POOL_SIZE} key pool)...`);
 
-          const analysis = await analyzeTradeSignal(alertData, technicalSummary);
+          const analysis = await analyzeTradeSignal(alertData, tfSummaries, {
+            onRotate: (from, to, total) =>
+              onLog(`⚠️ Gemini key ${from}/${total} quota hit — switching to key ${to}`),
+          });
 
-          const tp1 = analysis.take_profits?.[0]?.price;
-          const tp2 = analysis.take_profits?.[1]?.price;
-          const tp3 = analysis.take_profits?.[2]?.price;
+          const strategy = analysis.strategy || 'day_trading';
+          const stratLabel = STRATEGY_RULES[strategy]?.label ?? strategy.toUpperCase();
 
-          onLog(`🧠 Gemini output for ${alertData.symbol}:`);
-          onLog(`   Confidence: ${analysis.confidence}% · Risk: ${analysis.risk_rating?.toUpperCase()} · R:R: ${analysis.risk_reward}`);
+          onLog(`🧠 Gemini → ${stratLabel} on ${analysis.recommended_timeframe ?? '?'} · ${analysis.direction}`);
+          onLog(`   Conf: ${analysis.confidence}% · Risk: ${analysis.risk_rating?.toUpperCase()} · R:R: ${analysis.risk_reward}`);
+          if (analysis.confidence_breakdown) {
+            const cb = analysis.confidence_breakdown;
+            onLog(`   Breakdown: Trend=${cb.trend_analysis}% Vol=${cb.volume_analysis}% Mom=${cb.momentum}% Struct=${cb.market_structure}%`);
+          }
           if (analysis.entry?.price)
-            onLog(`   Entry: ${analysis.entry.price} (${analysis.entry.type}) · Zone: ${analysis.entry.zone_low}–${analysis.entry.zone_high}`);
+            onLog(`   Entry: ${analysis.entry.price} (${analysis.entry.type})`);
           if (analysis.stop_loss?.price)
-            onLog(`   SL: ${analysis.stop_loss.price} — ${analysis.stop_loss.reasoning}`);
-          if (tp1) onLog(`   TP1: ${tp1}${tp2 ? ` · TP2: ${tp2}` : ''}${tp3 ? ` · TP3: ${tp3}` : ''}`);
-          if (analysis.trade_management?.max_hold_time)
-            onLog(`   Hold: ${analysis.trade_management.max_hold_time} · Invalidation: ${analysis.trade_management.invalidation}`);
+            onLog(`   SL: ${analysis.stop_loss.price} (${analysis.stop_loss.pips ?? '?'}p) — ${analysis.stop_loss.reasoning}`);
+          const tps = analysis.take_profits || [];
+          if (tps.length)
+            onLog(`   TPs: ${tps.map(t => `TP${t.level}=${t.price}(${t.pips ?? '?'}p)`).join(' · ')}`);
+          if (analysis.mtf_confluence)
+            onLog(`   ⚡ MTF: "${analysis.mtf_confluence}"`);
           if (analysis.summary)
             onLog(`   💬 "${analysis.summary}"`);
 
-          // ── Stage 3: Risk engine ────────────────────────────────
+          // ── Stage 3: Risk engine ──────────────────────────────
           push({ stage: 'risk', alert: alertData, analysis });
+          const risk   = runRiskEngine(analysis);
+          const minRR  = STRATEGY_RULES[strategy]?.minRR ?? 2.0;
           const confOk = analysis.confidence >= CONFIDENCE_THRESHOLD;
-          const rrOk   = analysis.risk_reward  >= RISK_REWARD_THRESHOLD;
-          onLog(`⚖️ Risk check: conf ${analysis.confidence}% ${confOk ? '✓' : '✗'} · R:R ${analysis.risk_reward} ${rrOk ? '✓' : '✗'}`);
-
-          const risk = runRiskEngine(analysis);
+          const rrOk   = analysis.risk_reward >= minRR;
+          onLog(`⚖️ ${stratLabel} risk: conf ${analysis.confidence}% ${confOk ? '✓' : '✗'} · R:R ${analysis.risk_reward} vs ${minRR} ${rrOk ? '✓' : '✗'}`);
 
           const analysisRef = await addDoc(collection(db, 'analysis'), {
-            alertId:        change.doc.id,
-            symbol:         alertData.symbol,
-            signal:         alertData.signal || null,
-            strategy:       alertData.strategy || null,
-            timeframe:      alertData.timeframe || null,
-            exchange:       alertData.exchange || null,
-            price:          parseFloat(alertData.close || alertData.price || 0),
-            rsi:            alertData.rsi ? parseFloat(alertData.rsi) : null,
+            alertId:               change.doc.id,
+            symbol:                alertData.symbol,
+            signal:                analysis.direction || alertData.signal || null,
+            strategy:              strategy,
+            recommended_timeframe: analysis.recommended_timeframe || null,
+            timeframe:             null,   // multi-TF — no single trigger TF
+            exchange:              alertData.exchange || null,
+            price:                 parseFloat(alertData.close || alertData.price || 0),
+            rsi:                   alertData.rsi ? parseFloat(alertData.rsi) : null,
             analysis,
-            riskPassed:     risk.passed,
-            riskRejections: risk.rejections,
-            outcome:        null,
-            pnl:            null,
-            outcomeNote:    null,
-            closedAt:       null,
-            createdAt:      serverTimestamp(),
+            riskPassed:            risk.passed,
+            riskRejections:        risk.rejections,
+            outcome:               null,
+            pnl:                   null,
+            outcomeNote:           null,
+            closedAt:              null,
+            createdAt:             serverTimestamp(),
           });
 
-          // ── Stage 4: Telegram (approved trades only) ────────────
+          // ── Stage 4: Telegram (approved only) ────────────────
           if (risk.passed) {
             try {
               push({ stage: 'telegram', alert: alertData, analysis, risk });
-              onLog(`📨 Sending Telegram notification...`);
+              onLog(`📨 Sending Telegram...`);
               await sendTelegramMessage(buildApprovedMessage(alertData, analysis));
-              onLog(`📨 Telegram sent for ${alertData.symbol}`);
+              onLog(`📨 Telegram sent — ${alertData.symbol} ${stratLabel} ${analysis.direction}`);
             } catch (telErr) {
               onLog(`⚠️ Telegram failed: ${telErr.message}`);
             }
           } else {
-            onLog(`🔕 Telegram skipped — trade rejected, no notification sent`);
+            onLog(`🔕 Telegram skipped — ${risk.rejections.join(' · ')}`);
           }
 
           await updateDoc(alertRef, {
@@ -169,11 +160,10 @@ export default function BotEngine({ onLog, onPipelineUpdate }) {
             processedAt: serverTimestamp(),
           });
 
-          // ── Stage 5: Done ───────────────────────────────────────
+          // ── Stage 5: Done ─────────────────────────────────────
           push({ stage: 'done', alert: alertData, analysis, risk });
-
           const verdict = risk.passed
-            ? `✅ APPROVED — conf: ${analysis.confidence}%, R:R: ${analysis.risk_reward}`
+            ? `✅ APPROVED — ${stratLabel} ${analysis.direction} conf:${analysis.confidence}% R:R:${analysis.risk_reward}`
             : `🚫 REJECTED — ${risk.rejections.join(' · ')}`;
           onLog(`${alertData.symbol}: ${verdict}`);
           onLog(`─────────────────────────────────────────────`);

@@ -171,6 +171,34 @@ export function buildTechnicalSummary(candles, dataSource = 'unknown') {
   };
 }
 
+// ── Compact single-line TF summary for multi-TF overview ────
+export function formatCompact(summary, tf) {
+  if (!summary) return `  [${tf}] no data`;
+  const { rsi, ema, macd, bollinger: bb, atr, trend, last_close, candle_count } = summary;
+
+  const dp = v => {
+    if (v == null) return 'N/A';
+    const a = Math.abs(v);
+    if (a >= 10000) return v.toFixed(1);
+    if (a >= 100)   return v.toFixed(2);
+    if (a >= 1)     return v.toFixed(5);
+    return v.toFixed(8);
+  };
+
+  let emaAlign = 'N/A';
+  if (ema.ema9 && ema.ema20) {
+    emaAlign = ema.ema50
+      ? (ema.ema9 > ema.ema20 && ema.ema20 > ema.ema50 ? 'BULL' : ema.ema9 < ema.ema20 && ema.ema20 < ema.ema50 ? 'BEAR' : 'MIX')
+      : (ema.ema9 > ema.ema20 ? 'BULL' : 'BEAR');
+  }
+
+  const macdStr = macd
+    ? `${macd.histogram > 0 ? '▲' : '▼'}${macd.crossover ? 'CROSS↑' : macd.crossunder ? 'CROSS↓' : ''}`
+    : 'N/A';
+
+  return `  [${tf}·${candle_count}bars] Last=${dp(last_close)} RSI=${rsi ?? 'N/A'} EMA=${emaAlign} MACD=${macdStr} BB=%B${bb ? bb.pct_b.toFixed(0) : 'N/A'}% ATR=${dp(atr)} → ${trend.toUpperCase()}`;
+}
+
 // ── Format summary as readable text block for Gemini ─────────
 export function formatForPrompt(summary, symbol, timeframe) {
   if (!summary) {

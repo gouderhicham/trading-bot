@@ -1057,6 +1057,205 @@ td.muted  { color: var(--text-muted); }
   padding: 0.5rem 0.75rem;
 }
 
+/* ── Signal Card v2 (multi-TF redesign) ─────────────────────── */
+.signal-v2 {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-muted);
+  border-radius: 12px;
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.signal-v2:hover { transform: translateY(-1px); box-shadow: var(--card-shadow); }
+.sv2-long  { border-left-color: var(--green); }
+.sv2-short { border-left-color: var(--red);   }
+.sv2-expired { opacity: 0.55; }
+
+/* Header */
+.sv2-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.sv2-header-left  { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+.sv2-header-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
+
+.sv2-strategy-tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  padding: 0.18rem 0.55rem;
+  border: 1px solid;
+  border-radius: 5px;
+}
+.sv2-symbol {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.sv2-tf-badge {
+  font-size: 0.7rem;
+  font-family: 'Fira Code', monospace;
+  color: var(--purple);
+  background: rgba(139,92,246,0.1);
+  border: 1px solid rgba(139,92,246,0.25);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+.sv2-dir-badge {
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid;
+  border-radius: 6px;
+  letter-spacing: 0.3px;
+}
+.sv2-time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* Price grid */
+.sv2-prices {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.3rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.4rem;
+}
+.sc-price-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+}
+.sc-price-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.sc-price-val {
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-family: 'Fira Code', monospace;
+}
+.sc-price-pips {
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  font-family: 'Fira Code', monospace;
+}
+.sc-price-sub {
+  font-size: 0.6rem;
+  color: var(--text-dim);
+}
+.price-cyan  { color: var(--cyan);  }
+.price-red   { color: var(--red);   }
+.price-green { color: var(--green); }
+
+/* Stats row */
+.sv2-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.3rem;
+}
+.sv2-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.4rem 0.3rem;
+}
+.sv2-stat-label {
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.sv2-stat-val {
+  font-size: 0.88rem;
+  font-weight: 700;
+  font-family: 'Fira Code', monospace;
+}
+.expired-txt { color: var(--red) !important; animation: pulse-dot 1s infinite; }
+
+/* Confidence breakdown */
+.sv2-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.5rem 0.6rem;
+  background: rgba(139,92,246,0.04);
+  border: 1px solid rgba(139,92,246,0.12);
+  border-radius: 8px;
+}
+.sc-conf-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.sc-conf-label {
+  width: 110px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.sc-conf-track {
+  flex: 1;
+  height: 5px;
+  background: var(--bg-card);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.sc-conf-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.sc-conf-val {
+  width: 34px;
+  text-align: right;
+  font-size: 0.7rem;
+  font-weight: 700;
+  font-family: 'Fira Code', monospace;
+  flex-shrink: 0;
+}
+
+/* MTF confluence note */
+.sv2-mtf {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background: rgba(6,182,212,0.04);
+  border: 1px solid rgba(6,182,212,0.12);
+  border-radius: 7px;
+  padding: 0.45rem 0.6rem;
+  line-height: 1.5;
+}
+.sv2-mtf-icon { color: var(--cyan); flex-shrink: 0; }
+
+/* Summary */
+.sv2-summary {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1.5;
+}
+
 /* ── Utility ─────────────────────────────────────────────────── */
 .muted { color: var(--text-muted); }
 
